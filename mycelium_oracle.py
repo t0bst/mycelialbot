@@ -1,6 +1,7 @@
 import os
 import time
 import tweepy
+from tweepy.errors import TooManyRequests
 from telegram import Bot
 import logging
 
@@ -29,12 +30,24 @@ def load_last_tweet_id():
     try:
         with open(LAST_TWEET_FILE, 'r') as f:
             return int(f.read().strip())
-    except FileNotFoundError:
+    except (FileNotFoundError, ValueError):
         return None
 
 def save_last_tweet_id(tweet_id):
     with open(LAST_TWEET_FILE, 'w') as f:
         f.write(str(tweet_id))
+
+def fetch_tweets(client, user_id, since_id):
+    try:
+        tweets_response = client.get_users_tweets(
+            id=user_id,
+            since_id=since_id,
+            max_results=5,
+            tweet_fields=['created_at', 'text']
+        )
+        return tweets_response.data
+    except TooManyRequests as e:
+        raise e  # We'll handle this in the main loop
 
 def main():
     # Check for missing environment variables
@@ -56,12 +69,16 @@ def main():
     logger.info(f"Monitoring Twitter account: @{TWITTER_USERNAME}")
 
     # Get the user ID from the username
-    user_response = client.get_user(username=TWITTER_USERNAME)
-    if user_response.data is None:
-        logger.error(f"User @{TWITTER_USERNAME} not found or access is denied.")
+    try:
+        user_response = client.get_user(username=TWITTER_USERNAME)
+        if user_response.data is None:
+            logger.error(f"User @{TWITTER_USERNAME} not found or access is denied.")
+            return
+        else:
+            user_id = user_response.data.id
+    except Exception as e:
+        logger.error(f"An error occurred while fetching user ID: {e}", exc_info=True)
         return
-    else:
-        user_id = user_response.data.id
 
     # Load last_tweet_id to avoid reposting old tweets
     last_tweet_id = load_last_tweet_id()
@@ -69,13 +86,7 @@ def main():
     while True:
         try:
             # Fetch the latest tweets since last_tweet_id
-            tweets_response = client.get_users_tweets(
-                id=user_id,
-                since_id=last_tweet_id,
-                max_results=5,
-                tweet_fields=['created_at', 'text']
-            )
-            tweets = tweets_response.data
+            tweets = fetch_tweets(client, user_id, last_tweet_id)
 
             if tweets:
                 # Tweets are returned in reverse chronological order
@@ -86,12 +97,21 @@ def main():
                     logger.info(f"Sent tweet ID {tweet.id} to Telegram.")
                     last_tweet_id = tweet.id  # Update last_tweet_id
                     save_last_tweet_id(last_tweet_id)  # Save to file
+
+                    # Respect Telegram's rate limits
+                    time.sleep(1)
             else:
                 logger.info(f"No new tweets found for user @{TWITTER_USERNAME}.")
 
             # Wait for a specified interval before checking again
-            time.sleep(120)  # Wait for 2 minutes
+            time.sleep(180)  # Wait for 3 minutes
 
+        except TooManyRequests as e:
+            # Handle Twitter API rate limit
+            reset_time = int(e.response.headers.get('x-rate-limit-reset', time.time() + 900))
+            sleep_duration = max(reset_time - int(time.time()), 60)
+            logger.warning(f"Twitter rate limit exceeded. Sleeping for {sleep_duration} seconds.")
+            time.sleep(sleep_duration)
         except Exception as e:
             logger.error(f"An error occurred: {e}", exc_info=True)
             time.sleep(60)  # Wait before retrying
