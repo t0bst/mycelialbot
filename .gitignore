@@ -1,0 +1,14 @@
+# Byte-compiled / optimized / DLL files
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Local data files
+data/
+
+# Environment files
+.env
+*.env
+
+# macOS hidden files
+.DS_Store
